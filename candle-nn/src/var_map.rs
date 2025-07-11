@@ -298,4 +298,3 @@ impl ConcurrentVarMap {
         &self.storage.data
     }
 }
-

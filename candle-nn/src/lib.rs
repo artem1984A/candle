@@ -56,6 +56,6 @@ pub use optim::{AdamW, Optimizer, ParamsAdamW, SGD};
 pub use rnn::{gru, lstm, GRUConfig, LSTMConfig, GRU, LSTM, RNN};
 pub use sequential::{seq, Sequential};
 pub use var_builder::VarBuilder;
-pub use var_map::VarMap;
+pub use var_map::{VarMap, ConcurrentVarMap};
 
 pub use candle::{Module, ModuleT};
