@@ -79,6 +79,7 @@ impl LLaVAConfig {
             rope_scaling: None, // Assume we don't have LLaVA for Llama 3.1
             max_position_embeddings: self.max_position_embeddings,
             tie_word_embeddings: self.tie_word_embeddings.unwrap_or(false),
+            lora_config: None,
         }
     }
 }

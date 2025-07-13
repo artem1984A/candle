@@ -5,138 +5,116 @@ extern crate accelerate_src;
 extern crate intel_mkl_src;
 
 use anyhow::{bail, Error as E, Result};
-use clap::{Parser, ValueEnum};
-
 use candle::{DType, Tensor, Var};
-use candle_nn::{Linear, Module, VarBuilder, VarMap};
 use candle_nn::var_map::ConcurrentVarMap;
+use candle_nn::{Linear, Module, VarBuilder, VarMap};
 use candle_transformers::generation::{LogitsProcessor, Sampling};
+use candle_transformers::models::llama as model;
+use clap::{Parser, ValueEnum};
 use hf_hub::{api::sync::Api, Repo, RepoType};
+use model::{Llama, LlamaConfig};
 use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use candle_transformers::models::llama as model;
-use model::{Llama, LlamaConfig};
-
 const EOS_TOKEN: &str = "</s>";
 const DEFAULT_PROMPT: &str = "My favorite theorem is ";
 
 #[derive(Clone, Debug, Copy, PartialEq, Eq, ValueEnum)]
 enum Which {
+    #[value(name = "v1")]
     V1,
+    #[value(name = "v2")]
     V2,
+    #[value(name = "v3")]
     V3,
-    V31,
+    #[value(name = "v3-instruct")]
     V3Instruct,
+    #[value(name = "v3.1")]
+    V31,
+    #[value(name = "v3.1-instruct")]
     V31Instruct,
+    #[value(name = "v3.2-1b")]
     V32_1b,
+    #[value(name = "v3.2-1b-instruct")]
     V32_1bInstruct,
+    #[value(name = "v3.2-3b")]
     V32_3b,
+    #[value(name = "v3.2-3b-instruct")]
     V32_3bInstruct,
     #[value(name = "solar-10.7b")]
     Solar10_7B,
     #[value(name = "tiny-llama-1.1b-chat")]
     TinyLlama1_1BChat,
-    #[value(name = "SmoLM2-1.7B")]
-    SmolLM2_1B,
-    #[value(name = "SmoLM2-1.7B-Instruct")]
-    SmolLM2_1BInstruct,
-    #[value(name = "SmoLM2-360M")]
-    SmolLM2_360M,
-    #[value(name = "SmoLM2-360M-Instruct")]
-    SmolLM2_360MInstruct,
     #[value(name = "SmoLM2-135M")]
     SmolLM2_135M,
     #[value(name = "SmoLM2-135M-Instruct")]
     SmolLM2_135MInstruct,
+    #[value(name = "SmoLM2-360M")]
+    SmolLM2_360M,
+    #[value(name = "SmoLM2-360M-Instruct")]
+    SmolLM2_360MInstruct,
+    #[value(name = "SmoLM2-1B")]
+    SmolLM2_1B,
+    #[value(name = "SmoLM2-1B-Instruct")]
+    SmolLM2_1BInstruct,
 }
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
-pub struct Args {
+struct Args {
     #[arg(long)]
     cpu: bool,
-
-    #[arg(long, default_value_t = 0.8)]
-    temperature: f64,
-
-    #[arg(long)]
-    top_p: Option<f64>,
-
-    #[arg(long)]
-    top_k: Option<usize>,
-
-    #[arg(long, default_value_t = 299792458)]
-    seed: u64,
-
-    #[arg(short = 'n', long, default_value_t = 10000)]
-    sample_len: usize,
-
-    #[arg(long)]
-    no_kv_cache: bool,
-
-    #[arg(long)]
-    prompt: Option<String>,
-
-    #[arg(long)]
-    dtype: Option<String>,
-
     #[arg(long)]
     tracing: bool,
-
-    #[arg(long)]
-    model_id: Option<String>,
-
-    #[arg(long)]
-    revision: Option<String>,
-
-    #[arg(long, default_value = "v3")]
-    which: Which,
-
-    #[arg(long)]
-    use_flash_attn: bool,
-
-    #[arg(long, default_value_t = 1.1)]
-    repeat_penalty: f32,
-
-    #[arg(long, default_value_t = 128)]
-    repeat_last_n: usize,
-
     #[arg(long)]
     lora_mode: bool,
-
-    #[arg(long, default_value_t = 16)]
-    lora_rank: usize,
-
-    #[arg(long, default_value_t = 32.0)]
-    lora_alpha: f64,
-
-    #[arg(long)]
-    train_data: Option<String>,
-
-    #[arg(long, default_value_t = 3)]
-    epochs: usize,
-
-    #[arg(long, default_value_t = 1e-4)]
-    learning_rate: f64,
-
-    #[arg(long)]
-    save_lora: Option<String>,
-
-    #[arg(long)]
-    load_lora: Option<String>,
-
-    #[arg(long, default_value = "llama-lora-custom")]
-    lora_adapter_name: String,
-
-    #[arg(long, default_value = "q_proj,v_proj,k_proj,o_proj")]
-    lora_target_modules: String,
-
     #[arg(long)]
     lora_inference: bool,
+    #[arg(long, default_value = "16")]
+    lora_rank: usize,
+    #[arg(long, default_value = "32.0")]
+    lora_alpha: f64,
+    #[arg(long, default_value = "q_proj,v_proj,k_proj,o_proj")]
+    lora_target_modules: String,
+    #[arg(long)]
+    load_lora: Option<String>,
+    #[arg(long, default_value = "my-lora-adapter")]
+    lora_adapter_name: String,
+    #[arg(long)]
+    train_data: Option<String>,
+    #[arg(long)]
+    use_flash_attn: bool,
+    #[arg(long)]
+    prompt: Option<String>,
+    #[arg(long, default_value_t = 0.8)]
+    temperature: f64,
+    #[arg(long, default_value_t = 9999)]
+    sample_len: usize,
+    #[arg(long)]
+    top_k: Option<usize>,
+    #[arg(long)]
+    top_p: Option<f64>,
+    #[arg(long, default_value_t = 299792458)]
+    seed: u64,
+    #[arg(long)]
+    no_kv_cache: bool,
+    #[arg(long)]
+    dtype: Option<String>,
+    #[arg(long)]
+    model_id: Option<String>,
+    #[arg(long)]
+    revision: Option<String>,
+    #[arg(long, default_value = "tiny-llama-1.1b-chat")]
+    which: Which,
+    #[arg(long, default_value_t = 1.1)]
+    repeat_penalty: f32,
+    #[arg(long, default_value_t = 128)]
+    repeat_last_n: usize,
+    #[arg(long)]
+    compare_mode: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -167,7 +145,6 @@ impl LoraConfig {
             .split(',')
             .map(|s| s.trim().to_string())
             .collect();
-
         Self::new(args.lora_rank, args.lora_alpha, target_modules)
     }
 }
@@ -186,26 +163,27 @@ impl LoraLinear {
     pub fn new(
         original: Linear,
         config: LoraConfig,
-        input_dim: usize,
-        output_dim: usize,
+        in_features: usize,
+        out_features: usize,
         module_name: String,
         vb: VarBuilder,
     ) -> candle::Result<Self> {
         println!(
             "Creating LoRA layer: {} ({}x{} -> rank {})",
-            module_name, input_dim, output_dim, config.rank
+            module_name, out_features, in_features, config.rank
         );
-
-        let lora_a_weight = vb.get((config.rank, input_dim), "lora_a.weight")?;
+        let lora_a_weight = vb.get_with_hints(
+            (config.rank, in_features),
+            &format!("{}.lora_a.weight", module_name),
+            candle_nn::init::DEFAULT_KAIMING_NORMAL,
+        )?;
         let lora_a = Linear::new(lora_a_weight, None);
-
         let lora_b_weight = vb.get_with_hints(
-            (output_dim, config.rank),
-            "lora_b.weight",
+            (out_features, config.rank),
+            &format!("{}.lora_b.weight", module_name),
             candle_nn::init::ZERO,
         )?;
         let lora_b = Linear::new(lora_b_weight, None);
-
         Ok(Self {
             original,
             lora_a,
@@ -218,43 +196,138 @@ impl LoraLinear {
 
     pub fn merge_weights(&mut self) -> candle::Result<()> {
         if self.merged {
+            println!("Warning: Weights for {} already merged", self.module_name);
             return Ok(());
         }
-
         println!("Merging LoRA weights for {}", self.module_name);
+        let lora_a_weight = self.lora_a.weight();
+        let lora_b_weight = self.lora_b.weight();
+
+        // Ensure dtype consistency
+        let original_dtype = self.original.weight().dtype();
+        let lora_a_weight = if lora_a_weight.dtype() != original_dtype {
+            lora_a_weight.to_dtype(original_dtype)?
+        } else {
+            lora_a_weight.clone()
+        };
+        let lora_b_weight = if lora_b_weight.dtype() != original_dtype {
+            lora_b_weight.to_dtype(original_dtype)?
+        } else {
+            lora_b_weight.clone()
+        };
+
+        let delta = lora_b_weight.matmul(&lora_a_weight)?;
+        let scaled_delta = delta.affine(self.config.scaling(), 0.0)?;
+        let original_weight = self.original.weight();
+        let merged_weight = (original_weight + scaled_delta)?;
+        self.original = Linear::new(merged_weight, self.original.bias().cloned());
         self.merged = true;
         Ok(())
     }
 
     pub fn unmerge_weights(&mut self) -> candle::Result<()> {
         if !self.merged {
+            println!("Warning: Weights for {} not merged", self.module_name);
             return Ok(());
         }
-
         println!("Unmerging LoRA weights for {}", self.module_name);
+        let lora_a_weight = self.lora_a.weight();
+        let lora_b_weight = self.lora_b.weight();
+
+        // Ensure dtype consistency
+        let original_dtype = self.original.weight().dtype();
+        let lora_a_weight = if lora_a_weight.dtype() != original_dtype {
+            lora_a_weight.to_dtype(original_dtype)?
+        } else {
+            lora_a_weight.clone()
+        };
+        let lora_b_weight = if lora_b_weight.dtype() != original_dtype {
+            lora_b_weight.to_dtype(original_dtype)?
+        } else {
+            lora_b_weight.clone()
+        };
+
+        let delta = lora_b_weight.matmul(&lora_a_weight)?;
+        let scaled_delta = delta.affine(self.config.scaling(), 0.0)?;
+        let current_weight = self.original.weight();
+        let original_weight = (current_weight - scaled_delta)?;
+        self.original = Linear::new(original_weight, self.original.bias().cloned());
         self.merged = false;
         Ok(())
     }
 
     pub fn lora_param_count(&self) -> usize {
-        let a_params = self.config.rank * self.lora_a.weight().dims()[1];
-        let b_params = self.lora_b.weight().dims()[0] * self.config.rank;
+        let a_params = self.lora_a.weight().elem_count();
+        let b_params = self.lora_b.weight().elem_count();
         a_params + b_params
+    }
+
+    pub fn debug_weight_change(&self) -> candle::Result<()> {
+        let original_norm = self.original.weight().sqr()?.sum_all()?.sqrt()?;
+
+        // Convert to f64 first, then to f32
+        let original_norm_f32 = match original_norm.dtype() {
+            DType::F64 => original_norm.to_scalar::<f64>()? as f32,
+            DType::F32 => original_norm.to_scalar::<f32>()?,
+            DType::F16 => original_norm.to_dtype(DType::F32)?.to_scalar::<f32>()?,
+            DType::BF16 => original_norm.to_dtype(DType::F32)?.to_scalar::<f32>()?,
+            _ => return Err(candle::Error::Msg("Unsupported dtype for norm".to_string())),
+        };
+
+        println!(
+            "Weight norm for {}: {}",
+            self.module_name, original_norm_f32
+        );
+
+        // Calculate the LoRA contribution
+        let delta = self.lora_b.weight().matmul(&self.lora_a.weight())?;
+        let delta_norm = delta.sqr()?.sum_all()?.sqrt()?;
+
+        // Convert to f64 first, then to f32
+        let delta_norm_f32 = match delta_norm.dtype() {
+            DType::F64 => delta_norm.to_scalar::<f64>()? as f32,
+            DType::F32 => delta_norm.to_scalar::<f32>()?,
+            DType::F16 => delta_norm.to_dtype(DType::F32)?.to_scalar::<f32>()?,
+            DType::BF16 => delta_norm.to_dtype(DType::F32)?.to_scalar::<f32>()?,
+            _ => return Err(candle::Error::Msg("Unsupported dtype for norm".to_string())),
+        };
+
+        println!(
+            "LoRA delta norm: {} ({}% of original)",
+            delta_norm_f32,
+            (delta_norm_f32 / original_norm_f32) * 100.0
+        );
+        Ok(())
+    }
+    pub fn weight(&self) -> &Tensor {
+        self.original.weight()
     }
 }
 
 impl Module for LoraLinear {
     fn forward(&self, input: &Tensor) -> candle::Result<Tensor> {
         let original_output = self.original.forward(input)?;
-
         if self.merged {
             return Ok(original_output);
         }
 
-        let lora_output = input
-            .apply(&self.lora_a)?
-            .apply(&self.lora_b)?
-            .affine(self.config.scaling(), 0.0)?;
+        // Ensure LoRA computation uses the same dtype as input
+        let input_dtype = input.dtype();
+        let lora_output = if self.lora_a.weight().dtype() != input_dtype {
+            let lora_a_weight = self.lora_a.weight().to_dtype(input_dtype)?;
+            let lora_b_weight = self.lora_b.weight().to_dtype(input_dtype)?;
+            let lora_a = Linear::new(lora_a_weight, None);
+            let lora_b = Linear::new(lora_b_weight, None);
+            input
+                .apply(&lora_a)?
+                .apply(&lora_b)?
+                .affine(self.config.scaling(), 0.0)?
+        } else {
+            input
+                .apply(&self.lora_a)?
+                .apply(&self.lora_b)?
+                .affine(self.config.scaling(), 0.0)?
+        };
 
         Ok((original_output + lora_output)?)
     }
@@ -279,9 +352,7 @@ impl LoraLlamaAttention {
         hidden_size: usize,
     ) -> candle::Result<Self> {
         println!("Creating LoRA attention for layer {}", layer_idx);
-
         let dummy_weight = Tensor::randn(0.0, 0.02, (hidden_size, hidden_size), device)?;
-
         let q_proj = if config.target_modules.contains(&"q_proj".to_string()) {
             Some(LoraLinear::new(
                 Linear::new(dummy_weight.clone(), None),
@@ -294,7 +365,6 @@ impl LoraLlamaAttention {
         } else {
             None
         };
-
         let k_proj = if config.target_modules.contains(&"k_proj".to_string()) {
             Some(LoraLinear::new(
                 Linear::new(dummy_weight.clone(), None),
@@ -307,7 +377,6 @@ impl LoraLlamaAttention {
         } else {
             None
         };
-
         let v_proj = if config.target_modules.contains(&"v_proj".to_string()) {
             Some(LoraLinear::new(
                 Linear::new(dummy_weight.clone(), None),
@@ -320,7 +389,6 @@ impl LoraLlamaAttention {
         } else {
             None
         };
-
         let o_proj = if config.target_modules.contains(&"o_proj".to_string()) {
             Some(LoraLinear::new(
                 Linear::new(dummy_weight, None),
@@ -333,7 +401,6 @@ impl LoraLlamaAttention {
         } else {
             None
         };
-
         Ok(Self {
             q_proj,
             k_proj,
@@ -342,6 +409,23 @@ impl LoraLlamaAttention {
             config,
             layer_idx,
         })
+    }
+
+    pub fn is_merged(&self) -> bool {
+        let mut all_merged = true;
+        if let Some(ref q) = self.q_proj {
+            all_merged &= q.merged;
+        }
+        if let Some(ref k) = self.k_proj {
+            all_merged &= k.merged;
+        }
+        if let Some(ref v) = self.v_proj {
+            all_merged &= v.merged;
+        }
+        if let Some(ref o) = self.o_proj {
+            all_merged &= o.merged;
+        }
+        all_merged
     }
 
     pub fn merge_all_weights(&mut self) -> candle::Result<()> {
@@ -376,21 +460,21 @@ impl LoraLlamaAttention {
         Ok(())
     }
 
-    pub fn total_lora_params(&self) -> usize {
-        let mut total = 0;
+    pub fn get_lora_param_count(&self) -> usize {
+        let mut count = 0;
         if let Some(ref q) = self.q_proj {
-            total += q.lora_param_count();
+            count += q.lora_param_count();
         }
         if let Some(ref k) = self.k_proj {
-            total += k.lora_param_count();
+            count += k.lora_param_count();
         }
         if let Some(ref v) = self.v_proj {
-            total += v.lora_param_count();
+            count += v.lora_param_count();
         }
         if let Some(ref o) = self.o_proj {
-            total += o.lora_param_count();
+            count += o.lora_param_count();
         }
-        total
+        count
     }
 }
 
@@ -401,204 +485,99 @@ pub struct LoraLlamaModel {
     pub lora_weights: Arc<VarMap>,
     pub concurrent_weights: Option<Arc<ConcurrentVarMap>>,
     pub model_config: model::Config,
+    pub device: candle::Device,
 }
 
 impl LoraLlamaModel {
     pub fn from_llama(
         base_model: Llama,
         model_config: model::Config,
-        lora_config: LoraConfig,
+        config: LoraConfig,
         device: &candle::Device,
-    ) -> candle::Result<Self> {
+    ) -> anyhow::Result<Self> {
         println!("Converting LLaMA to LoRA-enabled model...");
-        println!("Target modules: {:?}", lora_config.target_modules);
-
+        println!("Target modules: {:?}", config.target_modules);
         let lora_weights = Arc::new(VarMap::new());
-        let vb = VarBuilder::from_varmap(&lora_weights, DType::F32, device);
-
-        let mut lora_layers = BTreeMap::new();
+        // Get dtype from the base model config or use F32 as default for LoRA weights
+        let dtype = DType::F32; // LoRA weights are typically F32 even if base model is F16
+        let vb = VarBuilder::from_varmap(&lora_weights, dtype, device);
         let num_layers = model_config.num_hidden_layers;
         let hidden_size = model_config.hidden_size;
-
         println!("Processing {} LLaMA layers for LoRA", num_layers);
-
+        let mut lora_layers = BTreeMap::new();
         for layer_idx in 0..num_layers {
-            let layer_vb = vb.pp(&format!("layers.{}", layer_idx));
-
+            let layer_vb = vb.pp(format!("layers.{}", layer_idx));
+            let attention_vb = layer_vb.pp("self_attn");
             let lora_attention = LoraLlamaAttention::new_with_dummy_weights(
                 layer_idx,
-                lora_config.clone(),
-                layer_vb.pp("self_attn"),
+                config.clone(),
+                attention_vb,
                 device,
                 hidden_size,
             )?;
-
             lora_layers.insert(layer_idx, lora_attention);
         }
-
         let total_lora_params: usize = lora_layers
             .values()
-            .map(|layer| layer.total_lora_params())
+            .map(|attn| attn.get_lora_param_count())
             .sum();
-
         println!(
             "Created LoRA model with {} layers and {} total LoRA parameters",
             lora_layers.len(),
             total_lora_params
         );
-
         Ok(Self {
             base_model,
             lora_layers,
-            config: lora_config,
+            config,
             lora_weights,
             concurrent_weights: None,
             model_config,
+            device: device.clone(),
         })
+    }
+
+    pub fn device(&self) -> &candle::Device {
+        &self.device
     }
 
     pub fn enable_concurrent_inference(&mut self) -> candle::Result<()> {
         println!("Enabling concurrent inference mode...");
-        
         let concurrent_map = Arc::new(ConcurrentVarMap::new());
-        
         {
-            let mutex_data = self.lora_weights.data().lock().unwrap();
-            for (name, var) in mutex_data.iter() {
+            let locked_weights = self.lora_weights.data().lock().unwrap();
+            for (name, var) in locked_weights.iter() {
                 concurrent_map.insert(name.clone(), var.clone());
             }
         }
-        
         self.concurrent_weights = Some(concurrent_map);
         println!("Concurrent inference mode enabled!");
         Ok(())
     }
 
-    pub fn save_lora_adapters(&self, adapter_name: &str) -> anyhow::Result<String> {
-        let cache_dir = get_hf_cache_dir()?;
-        let adapter_dir = cache_dir.join("lora_adapters").join(adapter_name);
-        std::fs::create_dir_all(&adapter_dir)?;
-
-        let weights_path = adapter_dir.join("adapter_model.safetensors");
-        let config_path = adapter_dir.join("adapter_config.json");
-
-        println!("Saving LoRA adapters to: {:?}", adapter_dir);
-
-        let tensor_map = if let Some(ref concurrent_map) = self.concurrent_weights {
-            let concurrent_data = concurrent_map.read_data();
-            let mut map = HashMap::new();
-            for (name, var) in concurrent_data.iter() {
-                map.insert(name.clone(), var.as_tensor().clone());
-            }
-            map
-        } else {
-            let mutex_data = self.lora_weights.data().lock().unwrap();
-            let mut map = HashMap::new();
-            for (name, var) in mutex_data.iter() {
-                map.insert(name.clone(), var.as_tensor().clone());
-            }
-            map
-        };
-
-        candle::safetensors::save(&tensor_map, &weights_path)?;
+    pub fn prepare_for_training(&mut self) -> candle::Result<()> {
+        println!("Preparing LoRA model for training...");
+        for (_, attention) in self.lora_layers.iter_mut() {
+            attention.unmerge_all_weights()?;
+        }
         println!(
-            "Saved {} LoRA parameters to {:?}",
-            tensor_map.len(),
-            weights_path
+            "LoRA model ready for training with {} parameters",
+            self.lora_weights.data().lock().unwrap().len()
         );
-
-        let adapter_config = serde_json::json!({
-            "peft_type": "LORA",
-            "task_type": "CAUSAL_LM",
-            "r": self.config.rank,
-            "lora_alpha": self.config.alpha,
-            "lora_dropout": self.config.dropout.unwrap_or(0.1),
-            "target_modules": self.config.target_modules,
-            "modules_to_save": null,
-            "base_model_name_or_path": "meta-llama/Llama-2-7b-hf",
-            "created_by": "candle-llama-lora",
-            "creation_timestamp": std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs()
-        });
-
-        std::fs::write(&config_path, serde_json::to_string_pretty(&adapter_config)?)?;
-        println!("Saved adapter config to {:?}", config_path);
-
-        Ok(adapter_dir.to_string_lossy().to_string())
-    }
-
-    pub fn load_lora_adapters(&mut self, adapter_path: &str) -> anyhow::Result<()> {
-        let adapter_dir = std::path::Path::new(adapter_path);
-        let weights_path = adapter_dir.join("adapter_model.safetensors");
-        let config_path = adapter_dir.join("adapter_config.json");
-
-        println!("Loading LoRA adapters from: {:?}", adapter_dir);
-
-        if config_path.exists() {
-            let config_content = std::fs::read_to_string(&config_path)?;
-            let loaded_config: serde_json::Value = serde_json::from_str(&config_content)?;
-            println!(
-                "Loaded adapter config: rank={}, alpha={}, target_modules={:?}",
-                loaded_config["r"], loaded_config["lora_alpha"], loaded_config["target_modules"]
-            );
-        }
-
-        if weights_path.exists() {
-            let tensors = candle::safetensors::load(&weights_path, &candle::Device::Cpu)?;
-            println!("Loading {} LoRA parameters", tensors.len());
-
-            let mut loaded_vars = Vec::new();
-            
-            {
-                let mut mutex_data = self.lora_weights.data().lock().unwrap();
-                for (name, tensor) in tensors {
-                    let var = Var::from_tensor(&tensor)?;
-                    mutex_data.insert(name.clone(), var.clone());
-                    loaded_vars.push((name, var));
-                }
-            }
-            
-            if let Some(ref concurrent_map) = self.concurrent_weights {
-                for (name, var) in loaded_vars {
-                    concurrent_map.insert(name, var);
-                }
-            }
-
-            println!("Successfully loaded LoRA adapters!");
-        } else {
-            return Err(anyhow::anyhow!(
-                "LoRA weights file not found: {:?}",
-                weights_path
-            ));
-        }
-
         Ok(())
     }
 
     pub fn prepare_for_inference(&mut self) -> candle::Result<()> {
         println!("Preparing LoRA model for inference...");
-        
         if self.concurrent_weights.is_none() {
             self.enable_concurrent_inference()?;
         }
-        
         for (layer_idx, attention) in self.lora_layers.iter_mut() {
             attention.merge_all_weights()?;
             println!("Merged LoRA weights for layer {}", layer_idx);
         }
-        
-        println!("LoRA model ready for concurrent inference!");
-        Ok(())
-    }
-
-    pub fn prepare_for_training(&mut self) -> candle::Result<()> {
-        println!("Preparing LoRA model for training (unmerging weights)...");
-        for (layer_idx, attention) in self.lora_layers.iter_mut() {
-            attention.unmerge_all_weights()?;
-            println!("Unmerged LoRA weights for layer {}", layer_idx);
-        }
+        println!("LoRA model ready for inference!");
+        println!("All LoRA weights have been merged into the base model weights.");
         Ok(())
     }
 
@@ -608,32 +587,239 @@ impl LoraLlamaModel {
         index_pos: usize,
         cache: &mut model::Cache,
     ) -> candle::Result<Tensor> {
-        if let Some(ref concurrent_map) = self.concurrent_weights {
-            let _concurrent_data = concurrent_map.read_data();
-        }
-        
         self.base_model.forward(x, index_pos, cache)
+    }
+
+    pub fn load_lora_adapters(&mut self, adapter_path: &str) -> anyhow::Result<()> {
+        let adapter_dir = std::path::Path::new(adapter_path);
+        let weights_path = adapter_dir.join("adapter_model.safetensors");
+        let config_path = adapter_dir.join("adapter_config.json");
+        println!("Loading LoRA adapters from: {:?}", adapter_dir);
+        if config_path.exists() {
+            let config_content = std::fs::read_to_string(&config_path)?;
+            let loaded_config: serde_json::Value = serde_json::from_str(&config_content)?;
+            println!(
+                "Loaded adapter config: rank={}, alpha={}, target_modules={:?}",
+                loaded_config["r"], loaded_config["lora_alpha"], loaded_config["target_modules"]
+            );
+        }
+        if weights_path.exists() {
+            let tensors = candle::safetensors::load(&weights_path, &self.device)?;
+            println!("Loading {} LoRA parameters", tensors.len());
+            for (name, tensor) in tensors.iter() {
+                let parts: Vec<&str> = name.split('.').collect();
+                if parts.len() >= 5 && parts[0] == "layers" {
+                    if let Ok(layer_idx) = parts[1].parse::<usize>() {
+                        if let Some(lora_attn) = self.lora_layers.get_mut(&layer_idx) {
+                            let module_name = parts[3]; // q_proj, k_proj, etc.
+                            let weight_type = parts[4]; // lora_a, lora_b
+                            match (module_name, weight_type) {
+                                ("q_proj", "lora_a") => {
+                                    if let Some(ref mut q) = lora_attn.q_proj {
+                                        q.lora_a = Linear::new(tensor.clone(), None);
+                                    }
+                                }
+                                ("q_proj", "lora_b") => {
+                                    if let Some(ref mut q) = lora_attn.q_proj {
+                                        q.lora_b = Linear::new(tensor.clone(), None);
+                                    }
+                                }
+                                ("k_proj", "lora_a") => {
+                                    if let Some(ref mut k) = lora_attn.k_proj {
+                                        k.lora_a = Linear::new(tensor.clone(), None);
+                                    }
+                                }
+                                ("k_proj", "lora_b") => {
+                                    if let Some(ref mut k) = lora_attn.k_proj {
+                                        k.lora_b = Linear::new(tensor.clone(), None);
+                                    }
+                                }
+                                ("v_proj", "lora_a") => {
+                                    if let Some(ref mut v) = lora_attn.v_proj {
+                                        v.lora_a = Linear::new(tensor.clone(), None);
+                                    }
+                                }
+                                ("v_proj", "lora_b") => {
+                                    if let Some(ref mut v) = lora_attn.v_proj {
+                                        v.lora_b = Linear::new(tensor.clone(), None);
+                                    }
+                                }
+                                ("o_proj", "lora_a") => {
+                                    if let Some(ref mut o) = lora_attn.o_proj {
+                                        o.lora_a = Linear::new(tensor.clone(), None);
+                                    }
+                                }
+                                ("o_proj", "lora_b") => {
+                                    if let Some(ref mut o) = lora_attn.o_proj {
+                                        o.lora_b = Linear::new(tensor.clone(), None);
+                                    }
+                                }
+                                _ => {
+                                    println!(
+                                        "Unknown module/weight type: {}/{}",
+                                        module_name, weight_type
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            let mut loaded_vars = Vec::new();
+            {
+                let mut mutex_data = self.lora_weights.data().lock().unwrap();
+                for (name, tensor) in tensors {
+                    let var = Var::from_tensor(&tensor)?;
+                    mutex_data.insert(name.clone(), var.clone());
+                    loaded_vars.push((name, var));
+                }
+            }
+            if let Some(ref concurrent_map) = self.concurrent_weights {
+                for (name, var) in loaded_vars {
+                    concurrent_map.insert(name, var);
+                }
+            }
+            println!("Successfully loaded LoRA adapters!");
+            println!("Note: LoRA weights loaded but not yet merged. Call prepare_for_inference() to merge.");
+        } else {
+            return Err(anyhow::anyhow!(
+                "LoRA weights file not found: {:?}",
+                weights_path
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn save_lora_adapters(&self, adapter_name: &str) -> anyhow::Result<String> {
+        let save_dir = std::path::Path::new(&std::env::var("HOME")?)
+            .join(".cache/huggingface/hub/lora_adapters")
+            .join(adapter_name);
+        std::fs::create_dir_all(&save_dir)?;
+        let mut tensors = HashMap::new();
+        for (layer_idx, attention) in &self.lora_layers {
+            if let Some(ref q) = attention.q_proj {
+                tensors.insert(
+                    format!(
+                        "layers.{}.self_attn.q_proj.lora_a.weight", // Remove "_lora" - change to match inference expectation
+                        layer_idx
+                    ),
+                    q.lora_a.weight().clone(),
+                );
+                tensors.insert(
+                    format!(
+                        "layers.{}.self_attn.q_proj.lora_b.weight", // Remove "_lora" - change to match inference expectation
+                        layer_idx
+                    ),
+                    q.lora_b.weight().clone(),
+                );
+            }
+            if let Some(ref k) = attention.k_proj {
+                tensors.insert(
+                    format!(
+                        "layers.{}.self_attn.k_proj.lora_a.weight", // Remove "_lora"
+                        layer_idx
+                    ),
+                    k.lora_a.weight().clone(),
+                );
+                tensors.insert(
+                    format!(
+                        "layers.{}.self_attn.k_proj.lora_b.weight", // Remove "_lora"
+                        layer_idx
+                    ),
+                    k.lora_b.weight().clone(),
+                );
+            }
+            if let Some(ref v) = attention.v_proj {
+                tensors.insert(
+                    format!(
+                        "layers.{}.self_attn.v_proj.lora_a.weight", // Remove "_lora"
+                        layer_idx
+                    ),
+                    v.lora_a.weight().clone(),
+                );
+                tensors.insert(
+                    format!(
+                        "layers.{}.self_attn.v_proj.lora_b.weight", // Remove "_lora"
+                        layer_idx
+                    ),
+                    v.lora_b.weight().clone(),
+                );
+            }
+            if let Some(ref o) = attention.o_proj {
+                tensors.insert(
+                    format!(
+                        "layers.{}.self_attn.o_proj.lora_a.weight", // Remove "_lora"
+                        layer_idx
+                    ),
+                    o.lora_a.weight().clone(),
+                );
+                tensors.insert(
+                    format!(
+                        "layers.{}.self_attn.o_proj.lora_b.weight", // Remove "_lora"
+                        layer_idx
+                    ),
+                    o.lora_b.weight().clone(),
+                );
+            }
+        }
+
+        // Rest of the method stays the same...
+        let weights_path = save_dir.join("adapter_model.safetensors");
+        candle::safetensors::save(&tensors, &weights_path)?;
+
+        let adapter_config = serde_json::json!({
+            "r": self.config.rank,
+            "lora_alpha": self.config.alpha,
+            "lora_dropout": self.config.dropout.unwrap_or(0.0),
+            "target_modules": self.config.target_modules,
+            "peft_type": "LORA",
+        });
+        let config_path = save_dir.join("adapter_config.json");
+        std::fs::write(&config_path, serde_json::to_string_pretty(&adapter_config)?)?;
+
+        println!("Saved LoRA adapters to: {:?}", save_dir);
+        println!("  - Weights: adapter_model.safetensors");
+        println!("  - Config: adapter_config.json");
+        println!("  - Total parameters: {}", tensors.len());
+        Ok(save_dir.to_string_lossy().into_owned())
+    }
+
+    pub fn verify_merge_status(&self) {
+        println!("\n=== LoRA Merge Status ===");
+        for (layer_idx, attention) in self.lora_layers.iter() {
+            let mut status = vec![];
+            if let Some(ref q) = attention.q_proj {
+                status.push(format!(
+                    "q_proj: {}",
+                    if q.merged { "merged" } else { "not merged" }
+                ));
+            }
+            if let Some(ref k) = attention.k_proj {
+                status.push(format!(
+                    "k_proj: {}",
+                    if k.merged { "merged" } else { "not merged" }
+                ));
+            }
+            if let Some(ref v) = attention.v_proj {
+                status.push(format!(
+                    "v_proj: {}",
+                    if v.merged { "merged" } else { "not merged" }
+                ));
+            }
+            if let Some(ref o) = attention.o_proj {
+                status.push(format!(
+                    "o_proj: {}",
+                    if o.merged { "merged" } else { "not merged" }
+                ));
+            }
+            println!("Layer {}: {}", layer_idx, status.join(", "));
+        }
+        println!("========================\n");
     }
 }
 
-fn get_hf_cache_dir() -> anyhow::Result<std::path::PathBuf> {
-    let home_dir = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .map_err(|_| anyhow::anyhow!("Could not determine home directory"))?;
-
-    let cache_dir = std::path::Path::new(&home_dir)
-        .join(".cache")
-        .join("huggingface")
-        .join("hub");
-
-    std::fs::create_dir_all(&cache_dir)?;
-    Ok(cache_dir)
-}
-
-fn run_lora_fine_tuning(args: &Args) -> anyhow::Result<()> {
-    println!("=== LORA FINE-TUNING MODE ===");
-    println!("Training LLaMA model with LoRA adapters");
-
+fn run_lora_inference(args: &Args) -> anyhow::Result<()> {
+    println!("=== LORA INFERENCE MODE ===");
     let device = candle_examples::device(args.cpu)?;
     let dtype = match args.dtype.as_deref() {
         Some("f16") => DType::F16,
@@ -643,55 +829,327 @@ fn run_lora_fine_tuning(args: &Args) -> anyhow::Result<()> {
         None => DType::F16,
     };
 
-    let (llama, _tokenizer_filename, _cache, config) = {
+    // Load the base model
+    let (mut llama, tokenizer_filename, mut cache, mut config) = {
         let api = Api::new()?;
         let model_id = args.model_id.clone().unwrap_or_else(|| match args.which {
             Which::TinyLlama1_1BChat => "TinyLlama/TinyLlama-1.1B-Chat-v1.0".to_string(),
             Which::SmolLM2_135M => "HuggingFaceTB/SmolLM2-135M".to_string(),
+            Which::SmolLM2_135MInstruct => "HuggingFaceTB/SmolLM2-135M-Instruct".to_string(),
+            Which::SmolLM2_360M => "HuggingFaceTB/SmolLM2-360M".to_string(),
+            Which::SmolLM2_360MInstruct => "HuggingFaceTB/SmolLM2-360M-Instruct".to_string(),
+            Which::SmolLM2_1B => "HuggingFaceTB/SmolLM2-1.7B".to_string(),
+            Which::SmolLM2_1BInstruct => "HuggingFaceTB/SmolLM2-1.7B-Instruct".to_string(),
             _ => "TinyLlama/TinyLlama-1.1B-Chat-v1.0".to_string(),
         });
-
         println!("loading the model weights from {model_id}");
         let revision = args.revision.clone().unwrap_or("main".to_string());
         let api = api.repo(Repo::with_revision(model_id, RepoType::Model, revision));
-
         let tokenizer_filename = api.get("tokenizer.json")?;
         let config_filename = api.get("config.json")?;
         let config: LlamaConfig = serde_json::from_slice(&std::fs::read(config_filename)?)?;
-        let config = config.into_config(args.use_flash_attn);
+
+        // Enable LoRA in config if we're loading LoRA weights
+        let mut config = config.into_config(args.use_flash_attn);
+        if args.load_lora.is_some() {
+            let lora_config = model::LoraConfig {
+                rank: args.lora_rank,
+                alpha: args.lora_alpha,
+                dropout: Some(0.1),
+                target_modules: args
+                    .lora_target_modules
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .collect(),
+                enabled: true,
+            };
+            config.lora_config = Some(lora_config);
+        }
 
         let filenames = vec![api.get("model.safetensors")?];
         let cache = model::Cache::new(!args.no_kv_cache, dtype, &config, &device)?;
-
         let vb =
             unsafe { candle_nn::VarBuilder::from_mmaped_safetensors(&filenames, dtype, &device)? };
         (Llama::load(vb, &config)?, tokenizer_filename, cache, config)
     };
 
-    let lora_config = LoraConfig::from_args(args);
+    // Load tokenizer
+    let tokenizer = tokenizers::Tokenizer::from_file(tokenizer_filename.clone()).map_err(E::msg)?;
+
+    // If LoRA path is provided, load and optionally merge LoRA weights
+    if let Some(lora_path) = &args.load_lora {
+        println!("\n=== LOADING LORA ADAPTERS ===");
+        println!("Loading LoRA adapters from: {}", lora_path);
+
+        // Load LoRA weights directly into the model
+        let adapter_weights_path =
+            std::path::Path::new(lora_path).join("adapter_model.safetensors");
+
+        if !adapter_weights_path.exists() {
+            return Err(anyhow::anyhow!(
+                "LoRA weights file not found: {:?}",
+                adapter_weights_path
+            ));
+        }
+
+        llama.load_lora_weights(adapter_weights_path.to_str().unwrap())?;
+        println!("LoRA weights loaded successfully!");
+
+        // Merge weights for faster inference
+        llama.merge_lora_weights()?;
+        println!("LoRA weights merged into base model!");
+
+        // Show comparison if in compare mode
+        if args.compare_mode {
+            println!("\n=== BASELINE vs LoRA COMPARISON ===");
+            let test_prompts = vec![
+                "My printer won't connect to WiFi",
+                "How do I reset my router?",
+                "The dishwasher is making noise",
+            ];
+
+            for prompt in &test_prompts {
+                println!("\nPrompt: {}", prompt);
+                let tokens = tokenizer
+                    .encode(*prompt, true) // Fix: dereference prompt
+                    .map_err(E::msg)?
+                    .get_ids()
+                    .to_vec();
+                let input = Tensor::new(&tokens[..], &device)?.unsqueeze(0)?;
+                let logits = llama.forward(&input, 0, &mut cache.clone())?;
+                let logits = logits.squeeze(0)?;
+                let next_token = logits.argmax(candle::D::Minus1)?.to_scalar::<u32>()?;
+
+                if let Some(word) = tokenizer.decode(&[next_token], false).ok() {
+                    println!("LoRA Enhanced: {} [token: {}]", word, next_token);
+                }
+            }
+        }
+
+        println!("\n=== IMPORTANT ===");
+        println!("LoRA weights have been merged into the base model weights.");
+        println!("The model will now use the adapted weights for generation.");
+        println!("=================\n");
+    }
+
+    // Get EOS token
+    let eos_token_id = config.eos_token_id.or_else(|| {
+        tokenizer
+            .token_to_id(EOS_TOKEN)
+            .map(model::LlamaEosToks::Single)
+    });
+
+    // Full generation with user prompt
+    let prompt = args.prompt.as_ref().map_or(DEFAULT_PROMPT, |p| p.as_str());
+    let mut tokens = tokenizer
+        .encode(prompt, true) // This is already correct - prompt is &str
+        .map_err(E::msg)?
+        .get_ids()
+        .to_vec();
+
+    let mut tokenizer = candle_examples::token_output_stream::TokenOutputStream::new(tokenizer);
+
     println!(
-        "LoRA Config: rank={}, alpha={}, targets={:?}",
-        lora_config.rank, lora_config.alpha, lora_config.target_modules
+        "\nGenerating with {}LLaMA:",
+        if args.load_lora.is_some() {
+            "LoRA-enhanced "
+        } else {
+            ""
+        }
+    );
+    println!("Prompt: {}", prompt);
+    print!("{}", prompt);
+
+    // Setup logits processor
+    let mut logits_processor = {
+        let temperature = args.temperature;
+        let sampling = if temperature <= 0. {
+            Sampling::ArgMax
+        } else {
+            match (args.top_k, args.top_p) {
+                (None, None) => Sampling::All { temperature },
+                (Some(k), None) => Sampling::TopK { k, temperature },
+                (None, Some(p)) => Sampling::TopP { p, temperature },
+                (Some(k), Some(p)) => Sampling::TopKThenTopP { k, p, temperature },
+            }
+        };
+        LogitsProcessor::from_sampling(args.seed, sampling)
+    };
+
+    // Generation loop
+    let mut start_gen = std::time::Instant::now();
+    let mut index_pos = 0;
+    let mut token_generated = 0;
+
+    for index in 0..args.sample_len {
+        let (context_size, context_index) = if cache.use_kv_cache && index > 0 {
+            (1, index_pos)
+        } else {
+            (tokens.len(), 0)
+        };
+
+        if index == 1 {
+            start_gen = std::time::Instant::now()
+        }
+
+        let ctxt = &tokens[tokens.len().saturating_sub(context_size)..];
+        let input = Tensor::new(ctxt, &device)?.unsqueeze(0)?;
+
+        // Use the model normally - LoRA is now integrated
+        let logits = llama.forward(&input, context_index, &mut cache)?;
+        let logits = logits.squeeze(0)?;
+
+        // Apply repeat penalty if needed
+        let logits = if args.repeat_penalty == 1. {
+            logits
+        } else {
+            let start_at = tokens.len().saturating_sub(args.repeat_last_n);
+            candle_transformers::utils::apply_repeat_penalty(
+                &logits,
+                args.repeat_penalty,
+                &tokens[start_at..],
+            )?
+        };
+
+        index_pos += ctxt.len();
+        let next_token = logits_processor.sample(&logits)?;
+        token_generated += 1;
+        tokens.push(next_token);
+
+        // Check for EOS
+        match eos_token_id {
+            Some(model::LlamaEosToks::Single(eos_tok_id)) if next_token == eos_tok_id => break,
+            Some(model::LlamaEosToks::Multiple(ref eos_ids)) if eos_ids.contains(&next_token) => {
+                break
+            }
+            _ => (),
+        }
+
+        // Print token
+        if let Some(t) = tokenizer.next_token(next_token)? {
+            print!("{t}");
+            std::io::stdout().flush()?;
+        }
+    }
+
+    // Print any remaining tokens
+    if let Some(rest) = tokenizer.decode_rest().map_err(E::msg)? {
+        print!("{rest}");
+    }
+
+    // Print statistics
+    let dt = start_gen.elapsed();
+    println!(
+        "\n\n{} tokens generated ({} token/s)\n",
+        token_generated,
+        (token_generated - 1) as f64 / dt.as_secs_f64()
     );
 
-    let mut lora_model = LoraLlamaModel::from_llama(llama, config, lora_config, &device)?;
+    Ok(())
+}
 
+fn run_lora_fine_tuning(args: &Args) -> anyhow::Result<()> {
+    println!("=== LORA FINE-TUNING MODE ===");
+    let device = candle_examples::device(args.cpu)?;
+    let dtype = match args.dtype.as_deref() {
+        Some("f16") => DType::F16,
+        Some("bf16") => DType::BF16,
+        Some("f32") => DType::F32,
+        Some(dtype) => bail!("Unsupported dtype {dtype}"),
+        None => DType::F16,
+    };
+
+    // Load the base model
+    let (llama, tokenizer_filename, _cache, config) = {
+        let api = Api::new()?;
+        let model_id = args.model_id.clone().unwrap_or_else(|| match args.which {
+            Which::TinyLlama1_1BChat => "TinyLlama/TinyLlama-1.1B-Chat-v1.0".to_string(),
+            Which::SmolLM2_135M => "HuggingFaceTB/SmolLM2-135M".to_string(),
+            Which::SmolLM2_135MInstruct => "HuggingFaceTB/SmolLM2-135M-Instruct".to_string(),
+            Which::SmolLM2_360M => "HuggingFaceTB/SmolLM2-360M".to_string(),
+            Which::SmolLM2_360MInstruct => "HuggingFaceTB/SmolLM2-360M-Instruct".to_string(),
+            Which::SmolLM2_1B => "HuggingFaceTB/SmolLM2-1.7B".to_string(),
+            Which::SmolLM2_1BInstruct => "HuggingFaceTB/SmolLM2-1.7B-Instruct".to_string(),
+            _ => "TinyLlama/TinyLlama-1.1B-Chat-v1.0".to_string(),
+        });
+        println!("loading the model weights from {model_id}");
+        let revision = args.revision.clone().unwrap_or("main".to_string());
+        let api = api.repo(Repo::with_revision(model_id, RepoType::Model, revision));
+        let tokenizer_filename = api.get("tokenizer.json")?;
+        let config_filename = api.get("config.json")?;
+        let config: LlamaConfig = serde_json::from_slice(&std::fs::read(config_filename)?)?;
+        let config = config.into_config(args.use_flash_attn);
+        let filenames = vec![api.get("model.safetensors")?];
+        let cache = model::Cache::new(!args.no_kv_cache, dtype, &config, &device)?;
+        let vb =
+            unsafe { candle_nn::VarBuilder::from_mmaped_safetensors(&filenames, dtype, &device)? };
+        (Llama::load(vb, &config)?, tokenizer_filename, cache, config)
+    };
+
+    println!(
+        "LoRA Config: rank={}, alpha={}, targets={:?}",
+        args.lora_rank, args.lora_alpha, args.lora_target_modules
+    );
+
+    let lora_config = LoraConfig::from_args(args);
+    let mut lora_model = LoraLlamaModel::from_llama(llama, config, lora_config, &device)?;
     lora_model.prepare_for_training()?;
 
     if let Some(train_data_path) = &args.train_data {
         println!("Loading training data from: {}", train_data_path);
+        // Load training data
+        let training_texts = load_training_data(train_data_path)?;
+        let tokenizer = tokenizers::Tokenizer::from_file(tokenizer_filename)
+            .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {}", e))?;
+
+        println!(
+            "Starting training simulation with {} examples",
+            training_texts.len()
+        );
+
+        // Simulate training (real training would require gradient computation)
+        for (idx, text) in training_texts.iter().enumerate() {
+            println!("Processing example {}/{}", idx + 1, training_texts.len());
+            println!("Example text: {}", &text[..text.len().min(100)]);
+
+            let tokens = tokenizer
+                .encode(text.as_str(), true)
+                .map_err(|e| anyhow::anyhow!("Tokenization error: {}", e))?
+                .get_ids()
+                .to_vec();
+
+            println!("  - Tokenized into {} tokens", tokens.len());
+
+            // In real training, we would:
+            // 1. Forward pass through the model
+            // 2. Compute loss
+            // 3. Backward pass to compute gradients
+            // 4. Update LoRA weights
+
+            // For now, just simulate the process
+            std::thread::sleep(std::time::Duration::from_millis(100));
+
+            if idx % 2 == 0 {
+                println!("  - Simulating weight update for batch");
+            }
+        }
+
+        println!(
+            "Training simulation completed on {} examples",
+            training_texts.len()
+        );
+        println!("Note: This is a simulation - actual gradient computation not implemented");
     } else {
         println!("Using demo training data (no real training)");
-
         println!(
             "LoRA model ready for training with {} LoRA parameters",
             lora_model.lora_weights.data().lock().unwrap().len()
         );
-
         println!("Simulating training step...");
-        thread::sleep(Duration::from_millis(1000));
+        std::thread::sleep(std::time::Duration::from_millis(1000));
     }
 
+    // Save the LoRA adapters
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -706,150 +1164,44 @@ fn run_lora_fine_tuning(args: &Args) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run_lora_inference(args: &Args) -> anyhow::Result<()> {
-    println!("=== LORA INFERENCE MODE ===");
+// Add the load_training_data helper function:
+fn load_training_data(path: &str) -> anyhow::Result<Vec<String>> {
+    use std::fs::File;
+    use std::io::{BufRead, BufReader};
 
-    let device = candle_examples::device(args.cpu)?;
-    let dtype = match args.dtype.as_deref() {
-        Some("f16") => DType::F16,
-        Some("bf16") => DType::BF16,
-        Some("f32") => DType::F32,
-        Some(dtype) => bail!("Unsupported dtype {dtype}"),
-        None => DType::F16,
-    };
+    let file = File::open(path)?;
+    let reader = BufReader::new(file);
 
-    let (llama, tokenizer_filename, mut cache, config) = {
-        let api = Api::new()?;
-        let model_id = args.model_id.clone().unwrap_or_else(|| match args.which {
-            Which::TinyLlama1_1BChat => "TinyLlama/TinyLlama-1.1B-Chat-v1.0".to_string(),
-            Which::SmolLM2_135M => "HuggingFaceTB/SmolLM2-135M".to_string(),
-            _ => "TinyLlama/TinyLlama-1.1B-Chat-v1.0".to_string(),
-        });
+    // Try to parse as JSON first
+    if path.ends_with(".json") {
+        let content = std::fs::read_to_string(path)?;
+        let data: serde_json::Value = serde_json::from_str(&content)?;
 
-        println!("loading the model weights from {model_id}");
-        let revision = args.revision.clone().unwrap_or("main".to_string());
-        let api = api.repo(Repo::with_revision(model_id, RepoType::Model, revision));
-
-        let tokenizer_filename = api.get("tokenizer.json")?;
-        let config_filename = api.get("config.json")?;
-        let config: LlamaConfig = serde_json::from_slice(&std::fs::read(config_filename)?)?;
-        let config = config.into_config(args.use_flash_attn);
-
-        let filenames = vec![api.get("model.safetensors")?];
-        let cache = model::Cache::new(!args.no_kv_cache, dtype, &config, &device)?;
-
-        let vb =
-            unsafe { candle_nn::VarBuilder::from_mmaped_safetensors(&filenames, dtype, &device)? };
-        (Llama::load(vb, &config)?, tokenizer_filename, cache, config)
-    };
-
-    let lora_config = LoraConfig::from_args(args);
-    let mut lora_model = LoraLlamaModel::from_llama(llama, config.clone(), lora_config, &device)?;
-
-    if let Some(lora_path) = &args.load_lora {
-        lora_model.load_lora_adapters(lora_path)?;
-        lora_model.prepare_for_inference()?;
-
-        println!("LoRA adapters loaded and merged for inference");
-
-        let tokenizer = tokenizers::Tokenizer::from_file(tokenizer_filename).map_err(E::msg)?;
-        let eos_token_id = config.eos_token_id.or_else(|| {
-            tokenizer
-                .token_to_id(EOS_TOKEN)
-                .map(model::LlamaEosToks::Single)
-        });
-
-        let prompt = args.prompt.as_ref().map_or(DEFAULT_PROMPT, |p| p.as_str());
-        let mut tokens = tokenizer
-            .encode(prompt, true)
-            .map_err(E::msg)?
-            .get_ids()
-            .to_vec();
-        let mut tokenizer = candle_examples::token_output_stream::TokenOutputStream::new(tokenizer);
-
-        println!("\nGenerating with LoRA-enhanced LLaMA:");
-        println!("Prompt: {}", prompt);
-        print!("{}", prompt);
-
-        let mut logits_processor = {
-            let temperature = args.temperature;
-            let sampling = if temperature <= 0. {
-                Sampling::ArgMax
-            } else {
-                match (args.top_k, args.top_p) {
-                    (None, None) => Sampling::All { temperature },
-                    (Some(k), None) => Sampling::TopK { k, temperature },
-                    (None, Some(p)) => Sampling::TopP { p, temperature },
-                    (Some(k), Some(p)) => Sampling::TopKThenTopP { k, p, temperature },
-                }
-            };
-            LogitsProcessor::from_sampling(args.seed, sampling)
-        };
-
-        let mut start_gen = std::time::Instant::now();
-        let mut index_pos = 0;
-        let mut token_generated = 0;
-        for index in 0..args.sample_len {
-            let (context_size, context_index) = if cache.use_kv_cache && index > 0 {
-                (1, index_pos)
-            } else {
-                (tokens.len(), 0)
-            };
-            if index == 1 {
-                start_gen = std::time::Instant::now()
-            }
-            let ctxt = &tokens[tokens.len().saturating_sub(context_size)..];
-            let input = Tensor::new(ctxt, &device)?.unsqueeze(0)?;
-            let logits = lora_model.forward(&input, context_index, &mut cache)?;
-            let logits = logits.squeeze(0)?;
-            let logits = if args.repeat_penalty == 1. {
-                logits
-            } else {
-                let start_at = tokens.len().saturating_sub(args.repeat_last_n);
-                candle_transformers::utils::apply_repeat_penalty(
-                    &logits,
-                    args.repeat_penalty,
-                    &tokens[start_at..],
-                )?
-            };
-            index_pos += ctxt.len();
-
-            let next_token = logits_processor.sample(&logits)?;
-            token_generated += 1;
-            tokens.push(next_token);
-
-            match eos_token_id {
-                Some(model::LlamaEosToks::Single(eos_tok_id)) if next_token == eos_tok_id => {
-                    break;
-                }
-                Some(model::LlamaEosToks::Multiple(ref eos_ids))
-                    if eos_ids.contains(&next_token) =>
-                {
-                    break;
-                }
-                _ => (),
-            }
-            if let Some(t) = tokenizer.next_token(next_token)? {
-                print!("{t}");
-                std::io::stdout().flush()?;
-            }
+        if let serde_json::Value::Array(arr) = data {
+            let texts: Vec<String> = arr
+                .into_iter()
+                .filter_map(|v| {
+                    if let serde_json::Value::Object(obj) = v {
+                        obj.get("text")
+                            .and_then(|t| t.as_str())
+                            .map(|s| s.to_string())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            return Ok(texts);
         }
-        if let Some(rest) = tokenizer.decode_rest().map_err(E::msg)? {
-            print!("{rest}");
-        }
-        let dt = start_gen.elapsed();
-        println!(
-            "\n\n{} tokens generated ({} token/s)\n",
-            token_generated,
-            (token_generated - 1) as f64 / dt.as_secs_f64(),
-        );
-    } else {
-        return Err(anyhow::anyhow!(
-            "--load-lora path required for inference mode"
-        ));
     }
 
-    Ok(())
+    // Otherwise, read as plain text file (one example per line)
+    let texts: Vec<String> = reader
+        .lines()
+        .filter_map(|line| line.ok())
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+
+    Ok(texts)
 }
 
 fn main() -> Result<()> {
@@ -857,16 +1209,22 @@ fn main() -> Result<()> {
     use tracing_chrome::ChromeLayerBuilder;
     use tracing_subscriber::prelude::*;
 
-    let args = Args::parse();
-
-    if args.lora_mode {
-        return run_lora_fine_tuning(&args).map_err(|e| anyhow::anyhow!(e));
+    fn debug_adapter_file(path: &str) -> anyhow::Result<()> {
+        let tensors = candle::safetensors::load(path, &candle::Device::Cpu)?;
+        println!("Tensor names in adapter file:");
+        for (name, tensor) in tensors.iter() {
+            println!("  {}: {:?}", name, tensor.shape());
+        }
+        Ok(())
     }
 
+    let args = Args::parse();
+    if args.lora_mode {
+        return run_lora_fine_tuning(&args).map_err(|e| anyhow::anyhow!("{}", e));
+    }
     if args.lora_inference || args.load_lora.is_some() {
         return run_lora_inference(&args).map_err(|e| anyhow::anyhow!(e));
     }
-
     let _guard = if args.tracing {
         let (chrome_layer, guard) = ChromeLayerBuilder::new().build();
         tracing_subscriber::registry().with(chrome_layer).init();
@@ -874,7 +1232,6 @@ fn main() -> Result<()> {
     } else {
         None
     };
-
     let device = candle_examples::device(args.cpu)?;
     let dtype = match args.dtype.as_deref() {
         Some("f16") => DType::F16,
@@ -911,12 +1268,10 @@ fn main() -> Result<()> {
         println!("loading the model weights from {model_id}");
         let revision = args.revision.unwrap_or("main".to_string());
         let api = api.repo(Repo::with_revision(model_id, RepoType::Model, revision));
-
         let tokenizer_filename = api.get("tokenizer.json")?;
         let config_filename = api.get("config.json")?;
         let config: LlamaConfig = serde_json::from_slice(&std::fs::read(config_filename)?)?;
         let config = config.into_config(args.use_flash_attn);
-
         let filenames = match args.which {
             Which::V1
             | Which::V2
@@ -942,7 +1297,6 @@ fn main() -> Result<()> {
             }
         };
         let cache = model::Cache::new(!args.no_kv_cache, dtype, &config, &device)?;
-
         let vb =
             unsafe { candle_nn::VarBuilder::from_mmaped_safetensors(&filenames, dtype, &device)? };
         (Llama::load(vb, &config)?, tokenizer_filename, cache, config)
@@ -960,7 +1314,6 @@ fn main() -> Result<()> {
         .get_ids()
         .to_vec();
     let mut tokenizer = candle_examples::token_output_stream::TokenOutputStream::new(tokenizer);
-
     println!("starting the inference loop");
     print!("{prompt}");
     let mut logits_processor = {
@@ -977,7 +1330,6 @@ fn main() -> Result<()> {
         };
         LogitsProcessor::from_sampling(args.seed, sampling)
     };
-
     let mut start_gen = std::time::Instant::now();
     let mut index_pos = 0;
     let mut token_generated = 0;
@@ -1005,17 +1357,13 @@ fn main() -> Result<()> {
             )?
         };
         index_pos += ctxt.len();
-
         let next_token = logits_processor.sample(&logits)?;
         token_generated += 1;
         tokens.push(next_token);
-
         match eos_token_id {
-            Some(model::LlamaEosToks::Single(eos_tok_id)) if next_token == eos_tok_id => {
-                break;
-            }
+            Some(model::LlamaEosToks::Single(eos_tok_id)) if next_token == eos_tok_id => break,
             Some(model::LlamaEosToks::Multiple(ref eos_ids)) if eos_ids.contains(&next_token) => {
-                break;
+                break
             }
             _ => (),
         }
@@ -1031,7 +1379,7 @@ fn main() -> Result<()> {
     println!(
         "\n\n{} tokens generated ({} token/s)\n",
         token_generated,
-        (token_generated - 1) as f64 / dt.as_secs_f64(),
+        (token_generated - 1) as f64 / dt.as_secs_f64()
     );
     Ok(())
 }
